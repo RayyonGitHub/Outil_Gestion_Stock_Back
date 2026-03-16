@@ -1,5 +1,6 @@
 import httpx
 
+
 class OllamaClient:
     def __init__(self, url: str = "http://localhost:11434/api/generate"):
         self.url = url
@@ -8,10 +9,16 @@ class OllamaClient:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 self.url,
-                json={"model": model, "prompt": prompt, "stream": False},
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False
+                },
                 timeout=60.0
             )
-            print("DEBUG Ollama raw response:", response.text)  # <- ajoute cette ligne
+
+            print("DEBUG Ollama raw response:", response.text)
+
             try:
                 return response.json().get("response", "")
             except Exception:

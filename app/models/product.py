@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Numeric, DateTime, CheckConstrai
 from sqlalchemy.sql import func
 from app.core.database import Base
 
+
 class Produit(Base):
     __tablename__ = "produits"
 
@@ -14,13 +15,16 @@ class Produit(Base):
     seuil_min = Column(Integer, nullable=False, default=0)
     prix_achat = Column(Numeric(10, 2), nullable=False)
     prix_vente = Column(Numeric(10, 2), nullable=False)
-    
-    date_creation = Column(DateTime(timezone=True), server_default=func.now())
-    date_modification = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    # Contraintes de vérification (quantité >= 0, etc.)
+    date_creation = Column(DateTime(timezone=True), server_default=func.now())
+    date_modification = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now()
+    )
+
     __table_args__ = (
-        CheckConstraint('quantite >= 0', name='check_quantite_positive'),
-        CheckConstraint('prix_achat > 0', name='check_prix_achat_positif'),
-        CheckConstraint('prix_vente > 0', name='check_prix_vente_positif'),
+        CheckConstraint("quantite >= 0", name="check_quantite_positive"),
+        CheckConstraint("prix_achat > 0", name="check_prix_achat_positif"),
+        CheckConstraint("prix_vente > 0", name="check_prix_vente_positif"),
     )
