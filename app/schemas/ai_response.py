@@ -1,3 +1,6 @@
-# Fichier : ai_response.py
-# Module : schemas
-# TODO: Implémenter la logique ici
+from pydantic import BaseModel
+from typing import List
+
+class AIRecommendation(BaseModel):
+    analysis: str
+    recommendations: List[str]
