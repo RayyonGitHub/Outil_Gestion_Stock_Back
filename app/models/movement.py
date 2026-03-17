@@ -7,6 +7,7 @@ class MouvementType(str, enum.Enum):
     ENTREE = "ENTREE"
     SORTIE = "SORTIE"
     AJUSTEMENT = "AJUSTEMENT"
+    SUPPRESSION = "SUPPRESSION"
 
 class MouvementStock(Base):
     __tablename__ = "mouvements_stock"
