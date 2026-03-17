@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_roles
 from app.models.user import Utilisateur
 from app.schemas.user import UserResponse, UserUpdate, UserCreate
 
@@ -11,7 +11,10 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 @router.get("/", response_model=list[UserResponse])
-def get_users(db: Session = Depends(get_db)):
+def get_users(
+    db: Session = Depends(get_db),
+    role: str = Depends(require_roles("Administrateur"))
+):
     return db.query(Utilisateur).all()
 
 
@@ -39,7 +42,12 @@ def create_user(user_in: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/{user_id}", response_model=UserResponse)
-def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)):
+def update_user(
+    user_id: int,
+    payload: UserUpdate,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_roles("Administrateur"))
+):
     user = db.query(Utilisateur).filter(Utilisateur.id_utilisateur == user_id).first()
 
     if not user:
@@ -60,7 +68,11 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_roles("Administrateur"))
+):
     user = db.query(Utilisateur).filter(Utilisateur.id_utilisateur == user_id).first()
 
     if not user:
