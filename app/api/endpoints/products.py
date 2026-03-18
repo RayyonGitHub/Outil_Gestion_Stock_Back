@@ -8,10 +8,11 @@ from app.schemas.product import ProductResponse, ProductCreate
 
 router = APIRouter()
 
+
 @router.get("/", response_model=List[ProductResponse])
 def get_products(
     db: Session = Depends(get_db),
-    role: str = Depends(require_roles("Gestionnaire", "Vendeur", "Administrateur"))
+    current_user=Depends(require_roles("Gestionnaire", "Vendeur", "Administrateur"))
 ):
     return db.query(Produit).all()
 
@@ -20,7 +21,7 @@ def get_products(
 def create_product(
     product: ProductCreate,
     db: Session = Depends(get_db),
-    role: str = Depends(require_roles("Gestionnaire"))
+    current_user=Depends(require_roles("Gestionnaire", "Administrateur"))
 ):
     db_product = db.query(Produit).filter(Produit.reference == product.reference).first()
     if db_product:
@@ -38,7 +39,7 @@ def update_product(
     product_id: int,
     product_update: ProductCreate,
     db: Session = Depends(get_db),
-    role: str = Depends(require_roles("Gestionnaire"))
+    current_user=Depends(require_roles("Gestionnaire", "Administrateur"))
 ):
     db_product = db.query(Produit).filter(Produit.id_produit == product_id).first()
     if not db_product:
@@ -56,7 +57,7 @@ def update_product(
 def delete_product(
     product_id: int,
     db: Session = Depends(get_db),
-    role: str = Depends(require_roles("Gestionnaire"))
+    current_user=Depends(require_roles("Gestionnaire", "Administrateur"))
 ):
     produit = db.query(Produit).filter(Produit.id_produit == product_id).first()
     if not produit:
