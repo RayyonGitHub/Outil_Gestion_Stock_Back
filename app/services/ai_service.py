@@ -7,6 +7,7 @@ from sqlalchemy import text, or_
 from sqlalchemy.orm import Session
 from app.models.product import Produit
 from app.models.movement import MouvementStock, MouvementType
+from app.models.user import Utilisateur
 
 
 def extract_json(text_value: str) -> dict:
@@ -89,6 +90,9 @@ class AIService:
         self.db = db_session
         self.ollama = OllamaClient()
 
+    def _can_modify_stock(self, current_user: Utilisateur) -> bool:
+        return current_user.role in ["Gestionnaire", "Administrateur"]
+
     def _get_computed_alerts(self):
         query = text("""
             SELECT designation, quantite, seuil_min
@@ -125,17 +129,14 @@ class AIService:
         target = target.strip()
         target_norm = normalize_text(target)
 
-        # 1) Référence exacte stricte
         produit = self.db.query(Produit).filter(Produit.reference == target).first()
         if produit:
             return produit
 
-        # 2) Référence exacte insensible à la casse
         produit = self.db.query(Produit).filter(Produit.reference.ilike(target)).first()
         if produit:
             return produit
 
-        # 3) Référence partielle
         produits = self.db.query(Produit).filter(
             Produit.reference.ilike(f"%{target}%")
         ).all()
@@ -145,7 +146,6 @@ class AIService:
                     return produit
             return produits[0]
 
-        # 4) Désignation ou marque partielles
         produits = self.db.query(Produit).filter(
             or_(
                 Produit.designation.ilike(f"%{target}%"),
@@ -160,7 +160,6 @@ class AIService:
                     return produit
             return produits[0]
 
-        # 5) Recherche par mots
         words = [w for w in target.split() if w.strip()]
         if not words:
             return None
@@ -177,21 +176,94 @@ class AIService:
 
         return None
 
-    def _format_product_stock_response(self, produit: Produit) -> str:
-        if produit.quantite == 0:
-            statut = "Le produit est en rupture."
-        elif produit.quantite <= produit.seuil_min:
-            statut = "Le stock est sous surveillance car il a atteint ou dépassé le seuil d'alerte."
-        else:
-            statut = "Le stock est actuellement au-dessus du seuil d'alerte."
+    def _detect_product_field(self, user_message: str) -> str:
+        msg = normalize_text(user_message)
 
-        marque_info = f", marque {produit.marque}" if produit.marque else ""
+        if "marque" in msg:
+            return "marque"
+
+        if "categorie" in msg or "catégorie" in msg:
+            return "categorie"
+
+        if "prix d'achat" in msg or "prix achat" in msg or ("achat" in msg and "prix" in msg):
+            return "prix_achat"
+
+        if "prix de vente" in msg or ("vente" in msg and "prix" in msg):
+            return "prix_vente"
+
+        if "reference" in msg or "référence" in msg:
+            return "reference"
+
+        if "seuil" in msg:
+            return "seuil"
+
+        if "stock" in msg or "quantite" in msg or "quantité" in msg:
+            return "stock"
+
+        return "infos"
+
+    def _extract_target_from_search(self, user_message: str) -> str:
+        target = user_message
+
+        target = re.sub(
+            r"(?i)(dis-moi|dis moi|exactement|donne-moi|donne moi|montre-moi|montre moi|affiche|cherche|"
+            r"quel est|quelle est|quels sont|quelles sont|"
+            r"le|la|les|du|de la|de l'|des|"
+            r"produit|article|"
+            r"marque|categorie|catégorie|prix d'achat|prix achat|prix de vente|"
+            r"reference|référence|seuil d'alerte|seuil d’alerte|seuil|"
+            r"stock|quantite|quantité|infos|informations|details|détails|"
+            r"pour|sur|concernant|reste|restant|restants|en stock|il reste)",
+            " ",
+            target
+        )
+
+        target = re.sub(r"\s+", " ", target).strip(" ?.:;,")
+        return target
+
+    def _format_product_search_response(self, produit: Produit, field: str) -> str:
+        if field == "marque":
+            return f"La marque du produit {produit.reference} est {produit.marque or 'non renseignée'}."
+
+        if field == "categorie":
+            return f"La catégorie du produit {produit.reference} est {produit.categorie}."
+
+        if field == "prix_achat":
+            return f"Le prix d'achat du produit {produit.reference} est {produit.prix_achat}."
+
+        if field == "prix_vente":
+            return f"Le prix de vente du produit {produit.reference} est {produit.prix_vente}."
+
+        if field == "reference":
+            return f"La référence du produit {produit.designation} est {produit.reference}."
+
+        if field == "seuil":
+            return f"Le seuil d'alerte du produit {produit.reference} est fixé à {produit.seuil_min}."
+
+        if field == "stock":
+            if produit.quantite == 0:
+                statut = "Le produit est en rupture."
+            elif produit.quantite <= produit.seuil_min:
+                statut = "Le stock est sous surveillance car il a atteint ou dépassé le seuil d'alerte."
+            else:
+                statut = "Le stock est actuellement au-dessus du seuil d'alerte."
+
+            return (
+                f"Il reste {produit.quantite} unité(s) de {produit.designation} "
+                f"(réf: {produit.reference}). "
+                f"Le seuil d'alerte est fixé à {produit.seuil_min}. "
+                f"{statut}"
+            )
 
         return (
-            f"Il reste {produit.quantite} unité(s) de {produit.designation}"
-            f" (réf: {produit.reference}{marque_info}). "
-            f"Le seuil d'alerte est fixé à {produit.seuil_min}. "
-            f"{statut}"
+            f"Voici les informations du produit {produit.designation} "
+            f"(réf: {produit.reference}) : "
+            f"marque {produit.marque or 'non renseignée'}, "
+            f"catégorie {produit.categorie}, "
+            f"stock {produit.quantite}, "
+            f"seuil d'alerte {produit.seuil_min}, "
+            f"prix d'achat {produit.prix_achat}, "
+            f"prix de vente {produit.prix_vente}."
         )
 
     def _build_stock_analysis_response(self) -> str:
@@ -244,27 +316,29 @@ Analyse le message utilisateur suivant :
 Tu dois répondre uniquement en JSON.
 
 Détermine :
-- l'intention : "EXECUTE_ACTION", "QUERY_STOCK", "ANALYZE_STOCK" ou "UNKNOWN"
+- l'intention : "EXECUTE_ACTION", "QUERY_PRODUCT", "ANALYZE_STOCK" ou "UNKNOWN"
 - si nécessaire une action avec :
   - "type" : "ENTREE", "SORTIE", "AJUSTEMENT" ou "SUPPRESSION"
   - "target" : référence, désignation ou marque du produit
   - "qty" : nombre entier si une quantité est présente
 
 Règles :
-- "vendre", "sortie", "retirer" => SORTIE
-- "ajouter", "entrée", "réapprovisionner" => ENTREE
-- une demande de consultation de stock ou de seuil => QUERY_STOCK
+- "vendre", "sortie", "retirer" => EXECUTE_ACTION / SORTIE
+- "ajouter", "entrée", "réapprovisionner" => EXECUTE_ACTION / ENTREE
+- toute question sur un produit (stock, seuil, marque, catégorie, prix, référence, infos) => QUERY_PRODUCT
 - une demande de bilan global, d'analyse, de conseil, de risque de manque => ANALYZE_STOCK
 
 Exemples :
 - "Ajoute 5 REF001" => EXECUTE_ACTION
 - "Je viens de vendre 2 unités de PC Dell" => EXECUTE_ACTION
-- "Dis-moi exactement ce qu'il reste en stock pour REF001 et quel est son seuil d'alerte" => QUERY_STOCK
+- "Dis-moi exactement ce qu'il reste en stock pour REF001 et quel est son seuil d'alerte" => QUERY_PRODUCT
+- "Quelle est la marque du produit REF001 ?" => QUERY_PRODUCT
+- "Quel est le prix de vente de Dell ?" => QUERY_PRODUCT
 - "Fais-moi un bilan critique du stock" => ANALYZE_STOCK
 
 Format attendu :
 {{
-  "intent": "EXECUTE_ACTION" ou "QUERY_STOCK" ou "ANALYZE_STOCK" ou "UNKNOWN",
+  "intent": "EXECUTE_ACTION" ou "QUERY_PRODUCT" ou "ANALYZE_STOCK" ou "UNKNOWN",
   "action": {{
     "type": "ENTREE" ou "SORTIE" ou "AJUSTEMENT" ou "SUPPRESSION",
     "target": "reference, designation ou marque du produit",
@@ -275,7 +349,7 @@ Format attendu :
         resp = await self.ollama.generate(prompt=decision_prompt)
         return extract_json(resp)
 
-    async def chat_with_data(self, user_message: str):
+    async def chat_with_data(self, user_message: str, current_user: Utilisateur):
         try:
             decision = await self._detect_intent_and_action(user_message)
             intent = decision.get("intent", "UNKNOWN")
@@ -283,6 +357,7 @@ Format attendu :
 
             print("--- DEBUG IA ---")
             print(f"Message: {user_message}")
+            print(f"Utilisateur: {current_user.identifiant} / rôle: {current_user.role}")
             print(f"Intention détectée: {intent}")
             print(f"Action extraite: {action}")
 
@@ -290,6 +365,11 @@ Format attendu :
             # 1) WRITE : EXECUTE_ACTION
             # =========================
             if intent == "EXECUTE_ACTION":
+                if not self._can_modify_stock(current_user):
+                    return {
+                        "reply": "Accès refusé : seul un Gestionnaire ou un Administrateur peut ajouter ou retirer du stock. Le rôle Vendeur est limité à la consultation."
+                    }
+
                 target = action.get("target")
                 qty = action.get("qty", 0)
                 raw_type = action.get("type", "ENTREE")
@@ -333,7 +413,7 @@ Format attendu :
                     type=MouvementType(mvt_type),
                     quantite=qty,
                     commentaire=f"IA Order: {user_message}",
-                    id_utilisateur=1
+                    id_utilisateur=current_user.id_utilisateur
                 )
 
                 self.db.add(new_mouvement)
@@ -349,22 +429,14 @@ Format attendu :
                     )
                 }
 
-            # ======================
-            # 2) READ : QUERY_STOCK
-            # ======================
-            if intent == "QUERY_STOCK":
+            # =========================
+            # 2) READ : QUERY_PRODUCT
+            # =========================
+            if intent == "QUERY_PRODUCT":
                 target = action.get("target")
 
-                # Si l'IA n'a pas bien extrait la cible, on tente une récupération simple
                 if not target:
-                    # tentative basique : enlever quelques expressions communes
-                    target = user_message
-                    target = re.sub(
-                        r"(?i)(dis-moi|dis moi|exactement|ce qu'il reste|ce qu’il reste|en stock|pour le produit|quel est|quelle est|son seuil d'alerte|son seuil d’alerte|le seuil d'alerte|le seuil d’alerte)",
-                        " ",
-                        target
-                    )
-                    target = re.sub(r"\s+", " ", target).strip(" ?.:;,")
+                    target = self._extract_target_from_search(user_message)
 
                 produit = self._find_product(target)
 
@@ -373,8 +445,10 @@ Format attendu :
                         "reply": f"ERREUR : aucun produit n'a été trouvé pour '{target}'."
                     }
 
+                field = self._detect_product_field(user_message)
+
                 return {
-                    "reply": self._format_product_stock_response(produit)
+                    "reply": self._format_product_search_response(produit, field)
                 }
 
             # ============================
@@ -392,6 +466,7 @@ Format attendu :
                 "reply": (
                     "La demande a été reçue, mais l'intention n'a pas été reconnue clairement. "
                     "Essaie par exemple : 'Ajoute 5 REF001', "
+                    "'Quelle est la marque du produit REF001 ?', "
                     "'Dis-moi le stock de REF001', "
                     "ou 'Fais-moi un bilan critique du stock'."
                 )
