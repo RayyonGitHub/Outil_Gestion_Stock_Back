@@ -1,28 +1,33 @@
 # backend/app/core/database.py
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+import os
 
-# IMPORTANT : Le préfixe doit être 'sqlite+aiosqlite://' et non 'sqlite:///'
-SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:///./stockit.db"
+# IMPORTANT : On repasse sur un moteur synchrone classique
+# car 90% des routes utilisent db.query() qui est synchrone.
+SQLALCHEMY_DATABASE_URL = "sqlite:///./stockit.db"
 
-# Création du moteur ASYNCHRONE
-engine = create_async_engine(
+# Création du moteur
+engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     echo=True,  # Mettez à False en production pour moins de logs
-    future=True
+    connect_args={"check_same_thread": False} # Requis pour SQLite avec FastAPI
 )
 
-# Création des sessions ASYNCHRONES
-async_session = sessionmaker(
-    engine, 
-    class_=AsyncSession,  # Crucial : force l'utilisation de AsyncSession
-    expire_on_commit=False
+# Création des sessions SYNCHRONES
+SessionLocal = sessionmaker(
+    autocommit=False, 
+    autoflush=False, 
+    bind=engine
 )
 
-# Base pour les modèles (reste identique)
+# Base pour les modèles
 Base = declarative_base()
 
-# Dépendance FastAPI ASYNCHRONE
-async def get_db():
-    async with async_session() as session:
-        yield session
+# Dépendance FastAPI SYNCHRONE
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

@@ -8,7 +8,6 @@ from app.schemas.product import ProductResponse, ProductCreate
 
 router = APIRouter()
 
-
 @router.get("/", response_model=List[ProductResponse])
 def get_products(
     db: Session = Depends(get_db),

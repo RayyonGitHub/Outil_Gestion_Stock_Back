@@ -18,15 +18,12 @@ def get_users(
     return db.query(Utilisateur).all()
 
 
-# NOUVELLE ROUTE : Création d'utilisateur
 @router.post("/", response_model=UserResponse)
 def create_user(user_in: UserCreate, db: Session = Depends(get_db)):
-    # Vérifier que l'identifiant n'existe pas déjà
     existing_user = db.query(Utilisateur).filter(Utilisateur.identifiant == user_in.identifiant).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Cet identifiant existe déjà.")
     
-    # Hacher le mot de passe avant de sauvegarder
     hashed_password = pwd_context.hash(user_in.mot_de_passe)
     
     new_user = Utilisateur(
@@ -59,7 +56,7 @@ def update_user(
     if payload.actif is not None:
         user.actif = payload.actif
         
-    if payload.mot_de_passe: # Si l'admin décide de changer le mot de passe
+    if payload.mot_de_passe:
         user.mot_de_passe = pwd_context.hash(payload.mot_de_passe)
 
     db.commit()

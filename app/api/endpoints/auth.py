@@ -1,8 +1,10 @@
+# backend/app/api/endpoints/auth.py
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from pydantic import BaseModel
+import base64
 
 from app.core.database import get_db
 from app.models.user import Utilisateur
@@ -34,8 +36,12 @@ def login_for_access_token(
             detail="Ce compte est désactivé",
         )
 
+    # Génération d'un vrai token encoder en base64 contenant les infos de l'utilisateur
+    token_data = f"{user.id_utilisateur}:{user.identifiant}:{user.role}"
+    access_token = base64.b64encode(token_data.encode()).decode()
+
     return {
-        "access_token": f"vrai-jwt-token-pour-{user.identifiant}",
+        "access_token": access_token,
         "token_type": "bearer",
         "role": user.role
     }

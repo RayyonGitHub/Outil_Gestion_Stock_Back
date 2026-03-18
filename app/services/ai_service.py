@@ -2,263 +2,421 @@
 from app.utils.llm_client import OllamaClient
 import re
 import json
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime, timedelta
+import unicodedata
+from sqlalchemy import text, or_
+from sqlalchemy.orm import Session
+from app.models.product import Produit
+from app.models.movement import MouvementStock, MouvementType
 
-# Import des modèles depuis le paquet global (grâce à __init__.py)
-from app.models import Produit, MouvementStock
 
+def extract_json(text_value: str) -> dict:
+    if not text_value:
+        return {}
 
-def extract_json(text: str) -> dict:
-    """
-    Extrait et répare le JSON même si l'IA a fait des erreurs de formatage.
-    Stratégie multi-niveaux de réparation pour les LLM locaux.
-    """
-    if not text:
-        return {"error": "Réponse vide de l'IA"}
-
-    # 1. Nettoyer les balises markdown
-    clean_text = re.sub(r"```json\s*", "", text)
+    clean_text = re.sub(r"```json\s*", "", text_value)
     clean_text = re.sub(r"```\s*", "", clean_text)
-
-    # 2. Extraire le bloc entre accolades (plus robuste avec [\s\S]* au lieu de .*)
     match = re.search(r"\{[\s\S]*\}", clean_text)
-    if not match:
-        return {
-            "mode": "texte_libre",
-            "message": "Aucune structure JSON trouvée.",
-            "analyse_libre": text
-        }
-    
-    json_str = match.group()
 
-    # 3. ÉTAPE 1 : Remplacer tous les guillemets courbes/spéciaux par des guillemets droits
-    # Ceci résout la plupart des erreurs de guillemets générées par les LLMs
-    replacements = {
-        '\u201c': '"',  # " (LEFT DOUBLE QUOTATION MARK)
-        '\u201d': '"',  # " (RIGHT DOUBLE QUOTATION MARK)
-        '\u2018': '"',  # ' (LEFT SINGLE QUOTATION MARK)
-        '\u2019': '"',  # ' (RIGHT SINGLE QUOTATION MARK)
-        '\u300c': '"',  # 「 (CJK LEFT CORNER BRACKET)
-        '\u300d': '"',  # 」 (CJK RIGHT CORNER BRACKET)
-        '\u00ab': '"',  # « (LEFT POINTING DOUBLE ANGLE QUOTATION MARK)
-        '\u00bb': '"',  # » (RIGHT POINTING DOUBLE ANGLE QUOTATION MARK)
-    }
-    for special_char, normal_char in replacements.items():
-        json_str = json_str.replace(special_char, normal_char)
-    
-    # 4. TENTATIVE DIRECTE
+    if not match:
+        return {}
+
     try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        pass
-    
-    # 5. ÉTAPE 2 : Fonction pour échapper les sauts de ligne dans les strings
-    def fix_newlines_in_json(text):
-        """Échappe les sauts de ligne non échappés à l'intérieur des strings JSON"""
-        result = []
-        in_string = False
-        i = 0
-        
-        while i < len(text):
-            char = text[i]
-            
-            # Gérer les caractères d'échappement
-            if char == '\\' and i + 1 < len(text):
-                result.append(char)
-                result.append(text[i + 1])
-                i += 2
-                continue
-            
-            # Détecter les limites des strings
-            if char == '"':
-                result.append(char)
-                in_string = not in_string
-                i += 1
-                continue
-            
-            # À l'intérieur d'une string, échapper les newlines
-            if in_string:
-                if char == '\n':
-                    result.append('\\n')
-                    i += 1
-                    continue
-                elif char == '\r':
-                    result.append('\\r')
-                    i += 1
-                    continue
-                elif char == '\t':
-                    result.append('\\t')
-                    i += 1
-                    continue
-            
-            result.append(char)
-            i += 1
-        
-        return ''.join(result)
-    
-    try:
-        fixed_json = fix_newlines_in_json(json_str)
-        return json.loads(fixed_json)
-    except json.JSONDecodeError:
-        pass
-    
-    # 6. ÉTAPE 3 : Nettoyer les espaces inutiles autour des caractères spéciaux
-    try:
-        # Supprimer les espaces avant/après : et ,
-        cleaned = re.sub(r'\s*:\s*', ':', json_str)
-        cleaned = re.sub(r'\s*,\s*', ',', cleaned)
-        
-        fixed_again = fix_newlines_in_json(cleaned)
-        return json.loads(fixed_again)
-    except json.JSONDecodeError:
-        pass
-    
-    # 7. ÉTAPE 4 : Approche extrême - utiliser ast.literal_eval pour Python
-    try:
-        python_str = json_str.replace('true', 'True').replace('false', 'False').replace('null', 'None')
-        import ast
-        result = ast.literal_eval(python_str)
-        # Reconvertir en JSON valide
-        return json.loads(json.dumps(result))
+        return json.loads(match.group())
     except Exception:
-        pass
-    
-    # 8. Échec : retourner l'erreur
-    return {
-        "error": "JSON malformé (même après réparation)",
-        "details": "Impossible de réparer le JSON malgré plusieurs tentatives",
-        "extrait_problematic": json_str[:300]
+        return {}
+
+
+def normalize_text(value: str) -> str:
+    """
+    Supprime les accents, trim, met en minuscules.
+    Exemple :
+    - 'Entrée' -> 'entree'
+    - 'Réf-PC-01' -> 'ref-pc-01'
+    """
+    if not value:
+        return ""
+
+    value = value.strip()
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return value.lower().strip()
+
+
+def normalize_movement_type(raw_type: str) -> str | None:
+    """
+    Convertit les variantes renvoyées par l'IA
+    en valeurs compatibles avec MouvementType.
+    """
+    normalized = normalize_text(raw_type).upper()
+
+    mapping = {
+        "ENTREE": MouvementType.ENTREE.value,
+        "AJOUT": MouvementType.ENTREE.value,
+        "IN": MouvementType.ENTREE.value,
+        "REAPPRO": MouvementType.ENTREE.value,
+        "REAPPROVISIONNEMENT": MouvementType.ENTREE.value,
+
+        "SORTIE": MouvementType.SORTIE.value,
+        "RETRAIT": MouvementType.SORTIE.value,
+        "VENTE": MouvementType.SORTIE.value,
+        "VENDRE": MouvementType.SORTIE.value,
+        "OUT": MouvementType.SORTIE.value,
+
+        "AJUSTEMENT": MouvementType.AJUSTEMENT.value,
+        "SUPPRESSION": MouvementType.SUPPRESSION.value,
     }
+
+    if normalized in mapping:
+        return mapping[normalized]
+
+    if "ENTREE" in normalized or "AJOUT" in normalized or "REAPPRO" in normalized:
+        return MouvementType.ENTREE.value
+
+    if "SORTIE" in normalized or "RETRAIT" in normalized or "VENTE" in normalized or "VEND" in normalized:
+        return MouvementType.SORTIE.value
+
+    if "AJUST" in normalized:
+        return MouvementType.AJUSTEMENT.value
+
+    if "SUPPR" in normalized:
+        return MouvementType.SUPPRESSION.value
+
+    return None
 
 
 class AIService:
-    def __init__(self, db_session: AsyncSession):
+    def __init__(self, db_session: Session):
         self.db = db_session
         self.ollama = OllamaClient()
 
-    async def get_stock_recommendations(self, user_id: int):
-        """
-        Analyse les stocks critiques et génère des recommandations basées sur l'historique des 90 derniers jours.
-        """
-        ninety_days_ago = datetime.now() - timedelta(days=90)
-
-        # Requête SQL optimisée pour récupérer les produits en alerte + leur historique
+    def _get_computed_alerts(self):
         query = text("""
-            SELECT 
-                p.id_produit,
-                p.reference,
-                p.designation,
-                p.categorie,
-                p.quantite as stock_actuel,
-                p.seuil_min,
-                p.prix_achat,
-                p.prix_vente,
-                COALESCE(SUM(CASE 
-                    WHEN m.type = 'SORTIE' AND m.date_mouvement >= :date_start THEN m.quantite 
-                    ELSE 0 
-                END), 0) as total_sorties_90j,
-                COALESCE(SUM(CASE 
-                    WHEN m.type = 'ENTREE' AND m.date_mouvement >= :date_start THEN m.quantite 
-                    ELSE 0 
-                END), 0) as total_entrees_90j
-            FROM produits p
-            LEFT JOIN mouvements_stock m ON p.id_produit = m.id_produit
-            WHERE p.quantite <= p.seuil_min
-            GROUP BY p.id_produit, p.reference, p.designation, p.categorie, p.quantite, p.seuil_min, p.prix_achat, p.prix_vente
-            ORDER BY stock_actuel ASC;
+            SELECT designation, quantite, seuil_min
+            FROM produits
+            ORDER BY designation ASC
         """)
+        rows = self.db.execute(query).fetchall()
 
-        result = await self.db.execute(query, {"date_start": ninety_days_ago})
-        rows = result.fetchall()
+        alerts = []
+        recommendations = []
 
-        # Cas où tout va bien
-        if not rows:
+        for row in rows:
+            if row.quantite <= row.seuil_min:
+                label = "RUPTURE" if row.quantite == 0 else "STOCK BAS"
+                alerts.append(
+                    f"{label} : {row.designation} ({row.quantite} restants / Seuil: {row.seuil_min})"
+                )
+                recommendations.append(f"Réapprovisionner {row.designation}")
+
+        return alerts, recommendations
+
+    def _find_product(self, target: str) -> Produit | None:
+        """
+        Priorité de recherche :
+        1. référence exacte
+        2. référence insensible à la casse
+        3. référence partielle
+        4. désignation / marque
+        5. recherche par mots
+        """
+        if not target:
+            return None
+
+        target = target.strip()
+        target_norm = normalize_text(target)
+
+        # 1) Référence exacte stricte
+        produit = self.db.query(Produit).filter(Produit.reference == target).first()
+        if produit:
+            return produit
+
+        # 2) Référence exacte insensible à la casse
+        produit = self.db.query(Produit).filter(Produit.reference.ilike(target)).first()
+        if produit:
+            return produit
+
+        # 3) Référence partielle
+        produits = self.db.query(Produit).filter(
+            Produit.reference.ilike(f"%{target}%")
+        ).all()
+        if produits:
+            for produit in produits:
+                if normalize_text(produit.reference or "") == target_norm:
+                    return produit
+            return produits[0]
+
+        # 4) Désignation ou marque partielles
+        produits = self.db.query(Produit).filter(
+            or_(
+                Produit.designation.ilike(f"%{target}%"),
+                Produit.marque.ilike(f"%{target}%")
+            )
+        ).all()
+        if produits:
+            for produit in produits:
+                if normalize_text(produit.designation or "") == target_norm:
+                    return produit
+                if normalize_text(produit.marque or "") == target_norm:
+                    return produit
+            return produits[0]
+
+        # 5) Recherche par mots
+        words = [w for w in target.split() if w.strip()]
+        if not words:
+            return None
+
+        filters = []
+        for word in words:
+            filters.append(Produit.reference.ilike(f"%{word}%"))
+            filters.append(Produit.designation.ilike(f"%{word}%"))
+            filters.append(Produit.marque.ilike(f"%{word}%"))
+
+        produits = self.db.query(Produit).filter(or_(*filters)).all()
+        if produits:
+            return produits[0]
+
+        return None
+
+    def _format_product_stock_response(self, produit: Produit) -> str:
+        if produit.quantite == 0:
+            statut = "Le produit est en rupture."
+        elif produit.quantite <= produit.seuil_min:
+            statut = "Le stock est sous surveillance car il a atteint ou dépassé le seuil d'alerte."
+        else:
+            statut = "Le stock est actuellement au-dessus du seuil d'alerte."
+
+        marque_info = f", marque {produit.marque}" if produit.marque else ""
+
+        return (
+            f"Il reste {produit.quantite} unité(s) de {produit.designation}"
+            f" (réf: {produit.reference}{marque_info}). "
+            f"Le seuil d'alerte est fixé à {produit.seuil_min}. "
+            f"{statut}"
+        )
+
+    def _build_stock_analysis_response(self) -> str:
+        produits = self.db.query(Produit).order_by(Produit.designation.asc()).all()
+
+        if not produits:
+            return "Aucun produit n'est enregistré dans le stock pour le moment."
+
+        critiques = []
+        vigilance = []
+
+        for produit in produits:
+            if produit.quantite == 0:
+                critiques.append(
+                    f"- {produit.designation} (réf: {produit.reference}) : rupture totale, seuil {produit.seuil_min}."
+                )
+            elif produit.quantite <= produit.seuil_min:
+                vigilance.append(
+                    f"- {produit.designation} (réf: {produit.reference}) : {produit.quantite} restant(s), seuil {produit.seuil_min}."
+                )
+
+        if not critiques and not vigilance:
+            return (
+                "Bilan critique : aucun produit n'est actuellement en rupture ou en stock bas. "
+                "Aucun réapprovisionnement urgent n'est nécessaire."
+            )
+
+        response_parts = ["Bilan critique du stock :"]
+
+        if critiques:
+            response_parts.append("\nProduits en rupture :")
+            response_parts.extend(critiques)
+
+        if vigilance:
+            response_parts.append("\nProduits à surveiller :")
+            response_parts.extend(vigilance)
+
+        response_parts.append(
+            "\nConseil : lancer un réapprovisionnement prioritaire pour les ruptures, "
+            "puis anticiper les produits proches du seuil minimum."
+        )
+
+        return "\n".join(response_parts)
+
+    async def _detect_intent_and_action(self, user_message: str) -> dict:
+        decision_prompt = f"""
+Analyse le message utilisateur suivant :
+"{user_message}"
+
+Tu dois répondre uniquement en JSON.
+
+Détermine :
+- l'intention : "EXECUTE_ACTION", "QUERY_STOCK", "ANALYZE_STOCK" ou "UNKNOWN"
+- si nécessaire une action avec :
+  - "type" : "ENTREE", "SORTIE", "AJUSTEMENT" ou "SUPPRESSION"
+  - "target" : référence, désignation ou marque du produit
+  - "qty" : nombre entier si une quantité est présente
+
+Règles :
+- "vendre", "sortie", "retirer" => SORTIE
+- "ajouter", "entrée", "réapprovisionner" => ENTREE
+- une demande de consultation de stock ou de seuil => QUERY_STOCK
+- une demande de bilan global, d'analyse, de conseil, de risque de manque => ANALYZE_STOCK
+
+Exemples :
+- "Ajoute 5 REF001" => EXECUTE_ACTION
+- "Je viens de vendre 2 unités de PC Dell" => EXECUTE_ACTION
+- "Dis-moi exactement ce qu'il reste en stock pour REF001 et quel est son seuil d'alerte" => QUERY_STOCK
+- "Fais-moi un bilan critique du stock" => ANALYZE_STOCK
+
+Format attendu :
+{{
+  "intent": "EXECUTE_ACTION" ou "QUERY_STOCK" ou "ANALYZE_STOCK" ou "UNKNOWN",
+  "action": {{
+    "type": "ENTREE" ou "SORTIE" ou "AJUSTEMENT" ou "SUPPRESSION",
+    "target": "reference, designation ou marque du produit",
+    "qty": 0
+  }}
+}}
+"""
+        resp = await self.ollama.generate(prompt=decision_prompt)
+        return extract_json(resp)
+
+    async def chat_with_data(self, user_message: str):
+        try:
+            decision = await self._detect_intent_and_action(user_message)
+            intent = decision.get("intent", "UNKNOWN")
+            action = decision.get("action", {}) if isinstance(decision.get("action"), dict) else {}
+
+            print("--- DEBUG IA ---")
+            print(f"Message: {user_message}")
+            print(f"Intention détectée: {intent}")
+            print(f"Action extraite: {action}")
+
+            # =========================
+            # 1) WRITE : EXECUTE_ACTION
+            # =========================
+            if intent == "EXECUTE_ACTION":
+                target = action.get("target")
+                qty = action.get("qty", 0)
+                raw_type = action.get("type", "ENTREE")
+                mvt_type = normalize_movement_type(raw_type)
+
+                try:
+                    qty = int(qty)
+                except (TypeError, ValueError):
+                    qty = 0
+
+                if not target or qty <= 0:
+                    return {
+                        "reply": "ERREUR : quantité ou produit invalide."
+                    }
+
+                if not mvt_type:
+                    return {
+                        "reply": f"ERREUR : type de mouvement non reconnu ('{raw_type}')."
+                    }
+
+                produit = self._find_product(target)
+
+                if not produit:
+                    return {
+                        "reply": f"ERREUR : produit introuvable ('{target}')."
+                    }
+
+                old_qty = produit.quantite
+
+                if mvt_type == MouvementType.ENTREE.value:
+                    produit.quantite += qty
+                elif mvt_type == MouvementType.SORTIE.value:
+                    produit.quantite = max(0, produit.quantite - qty)
+                elif mvt_type == MouvementType.AJUSTEMENT.value:
+                    produit.quantite = qty
+                elif mvt_type == MouvementType.SUPPRESSION.value:
+                    produit.quantite = 0
+
+                new_mouvement = MouvementStock(
+                    id_produit=produit.id_produit,
+                    type=MouvementType(mvt_type),
+                    quantite=qty,
+                    commentaire=f"IA Order: {user_message}",
+                    id_utilisateur=1
+                )
+
+                self.db.add(new_mouvement)
+                self.db.commit()
+                self.db.refresh(produit)
+                self.db.refresh(new_mouvement)
+
+                return {
+                    "reply": (
+                        f"C'est fait : le stock de {produit.designation} "
+                        f"(réf: {produit.reference}) est passé de {old_qty} à {produit.quantite}. "
+                        f"Le mouvement {mvt_type} de {qty} unité(s) a bien été enregistré."
+                    )
+                }
+
+            # ======================
+            # 2) READ : QUERY_STOCK
+            # ======================
+            if intent == "QUERY_STOCK":
+                target = action.get("target")
+
+                # Si l'IA n'a pas bien extrait la cible, on tente une récupération simple
+                if not target:
+                    # tentative basique : enlever quelques expressions communes
+                    target = user_message
+                    target = re.sub(
+                        r"(?i)(dis-moi|dis moi|exactement|ce qu'il reste|ce qu’il reste|en stock|pour le produit|quel est|quelle est|son seuil d'alerte|son seuil d’alerte|le seuil d'alerte|le seuil d’alerte)",
+                        " ",
+                        target
+                    )
+                    target = re.sub(r"\s+", " ", target).strip(" ?.:;,")
+
+                produit = self._find_product(target)
+
+                if not produit:
+                    return {
+                        "reply": f"ERREUR : aucun produit n'a été trouvé pour '{target}'."
+                    }
+
+                return {
+                    "reply": self._format_product_stock_response(produit)
+                }
+
+            # ============================
+            # 3) CONSEIL : ANALYZE_STOCK
+            # ============================
+            if intent == "ANALYZE_STOCK":
+                return {
+                    "reply": self._build_stock_analysis_response()
+                }
+
+            # ============================
+            # 4) FALLBACK
+            # ============================
             return {
-                "status": "OK",
-                "message": "Aucun produit en alerte. Tous les stocks sont au-dessus des seuils.",
-                "synthese_executive": "Le stock est sain. Aucune action immédiate requise."
+                "reply": (
+                    "La demande a été reçue, mais l'intention n'a pas été reconnue clairement. "
+                    "Essaie par exemple : 'Ajoute 5 REF001', "
+                    "'Dis-moi le stock de REF001', "
+                    "ou 'Fais-moi un bilan critique du stock'."
+                )
             }
 
-        # Préparation des données pour le contexte de l'IA
-        products_data = []
-        for row in rows:
-            total_sorties = row.total_sorties_90j or 0
-            vitesse_vente_jour = total_sorties / 90.0 if total_sorties > 0 else 0.0
-            
-            # Calcul des jours avant rupture
-            if vitesse_vente_jour > 0:
-                jours_avant_rupture = round(row.stock_actuel / vitesse_vente_jour, 1)
-                # Tendance : forte si on vend plus de 10% du seuil par jour
-                tendance = "FORTE" if vitesse_vente_jour > (row.seuil_min / 10) else "FAIBLE"
-            else:
-                jours_avant_rupture = 999  # Stock dormant
-                tendance = "NULLE"
-
-            products_data.append({
-                "reference": row.reference,
-                "nom": row.designation,
-                "categorie": row.categorie,
-                "stock_actuel": row.stock_actuel,
-                "seuil_min": row.seuil_min,
-                "prix_vente": float(row.prix_vente),
-                "historique_90j": {
-                    "total_sorties": total_sorties,
-                    "vente_moyenne_jour": round(vitesse_vente_jour, 2),
-                    "jours_estimes_avant_rupture": jours_avant_rupture,
-                    "tendance": tendance
-                }
-            })
-
-        context_json = json.dumps(products_data, ensure_ascii=False)
-
-        # Prompt Engineering renforcé pour obtenir du JSON pur
-        prompt = f"""
-        RÔLE : Tu es une API JSON stricte de Supply Chain. Tu ne dois JAMAIS parler en langage naturel.
-        TÂCHE : Analyser les données de stock critiques ci-dessous et produire un JSON de recommandation.
-        
-        DONNÉES (Historique 90 jours) :
-        {context_json}
-
-        INSTRUCTIONS D'ANALYSE :
-        1. URGENCES : Produits avec 'jours_estimes_avant_rupture' < 7 jours.
-        2. QUANTITÉS : Utilise la formule : Qty = (vitesse_vente_jour * 15) - stock_actuel.
-        3. ANOMALIES : Si vitesse_vente_jour == 0 mais stock bas -> Suggère un audit (produit mort).
-
-        CONTRAINTES DE FORMAT (ABSOLU) :
-        - Ta réponse doit commencer IMMÉDIATEMENT par '{{' et finir par '}}'.
-        - AUCUN texte avant. AUCUN texte après.
-        - AUCUNE balise markdown (pas de ```json).
-        - Si erreur, renvoie {{ "error": "Description" }}.
-
-        STRUCTURE JSON ATTENDUE :
-        {{
-            "synthese_executive": "Phrase d'accroche percutante sur l'état global.",
-            "alertes_critiques": ["Liste des références en rupture < 3 jours"],
-            "plan_reapprovisionnement": [
-                {{
-                    "reference": "REF...",
-                    "nom": "Nom du produit",
-                    "statut": "URGENT" | "STANDARD" | "SURPLUS",
-                    "quantite_a_commander": 50,
-                    "justification_data": "Basé sur une vente de X/jour, rupture dans Y jours.",
-                    "priorite_metier": 1
-                }}
-            ],
-            "recommandations_strategiques": ["Conseil global basé sur les tendances"]
-        }}
-        """
-
-        try:
-            # Appel à Ollama
-            response = await self.ollama.generate(prompt=prompt, model="llama3:latest")
-            
-            # Extraction robuste du JSON
-            return extract_json(response)
-            
         except Exception as e:
+            self.db.rollback()
+            print(f"CRASH SERVICE: {str(e)}")
             return {
-                "error": "Échec de la connexion ou du traitement IA",
-                "details": str(e)
+                "reply": "Erreur technique lors de l'action."
+            }
+
+    async def get_stock_recommendations(self, user_id: int):
+        try:
+            alerts, recommands = self._get_computed_alerts()
+            return {
+                "synthese_executive": "Analyse du stock critique.",
+                "alertes_critiques": alerts,
+                "plan_reapprovisionnement": recommands
+            }
+        except Exception as e:
+            self.db.rollback()
+            print(f"CRASH RECOMMENDATIONS: {str(e)}")
+            return {
+                "synthese_executive": "Erreur lors de l'analyse du stock.",
+                "alertes_critiques": [],
+                "plan_reapprovisionnement": []
             }

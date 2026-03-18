@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
-from app.core.database import engine, Base  # engine est maintenant un AsyncEngine
+from app.core.database import engine, Base
 
 app = FastAPI(title="Projet Agile Back")
 
@@ -21,16 +21,12 @@ app.include_router(api_router)
 def root():
     return {"message": "API running"}
 
-# --- CORRECTION ICI : Startup Asynchrone ---
+# --- CORRECTION ICI : Startup Synchrone ---
 @app.on_event("startup")
-async def on_startup():
+def on_startup():
     """
-    Crée les tables de manière asynchrone au démarrage.
-    Compatible avec SQLite (aiosqlite) et PostgreSQL async.
+    Crée les tables de manière synchrone au démarrage.
+    Compatible avec SQLite et PostgreSQL sync.
     """
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    Base.metadata.create_all(bind=engine)
     print("✅ Tables de la base de données créées/vérifiées avec succès.")
-
-# Note: Plus besoin d'appeler create_all dans seed_test.py si on le fait ici,
-# mais le garder dans le seed ne fait pas de mal (c'est idempotent).

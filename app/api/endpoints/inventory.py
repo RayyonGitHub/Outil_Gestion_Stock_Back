@@ -9,7 +9,6 @@ from app.models.movement import MouvementStock, MouvementType
 
 router = APIRouter()
 
-# Schéma Pydantic pour lire un mouvement
 class MouvementResponse(BaseModel):
     id_mouvement: int
     id_produit: int
@@ -22,7 +21,6 @@ class MouvementResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# Schéma Pydantic pour créer un mouvement
 class MouvementCreate(BaseModel):
     id_produit: int
     type: str
@@ -31,7 +29,6 @@ class MouvementCreate(BaseModel):
 
 @router.get("/movements", response_model=List[MouvementResponse])
 def get_movements(db: Session = Depends(get_db)):
-    # On récupère tous les mouvements, du plus récent au plus ancien
     result = db.execute(
         select(MouvementStock).order_by(MouvementStock.date_mouvement.desc())
     )
@@ -45,7 +42,6 @@ def create_movement(mvt: MouvementCreate, db: Session = Depends(get_db)):
             type=mvt.type,
             quantite=mvt.quantite,
             commentaire=mvt.commentaire,
-            # Normalement on prend l'ID du token connecté, on force à 1 en dev s'il manque
             id_utilisateur=1 
         )
         db.add(new_mouvement)
